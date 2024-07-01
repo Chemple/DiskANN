@@ -18,6 +18,7 @@
 # Some variables like MSVC are defined only after project(), so put that first.
 cmake_minimum_required(VERSION 3.15)
 project(diskann)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
