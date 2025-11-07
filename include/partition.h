@@ -47,3 +47,20 @@ int partition(const std::string data_file, const float sampling_rate, size_t num
 template <typename T>
 int partition_with_ram_budget(const std::string data_file, const double sampling_rate, double ram_budget,
                               size_t graph_degree, const std::string prefix_path, size_t k_base);
+
+namespace sogaic
+{
+template <typename T>
+int shard_data_into_clusters_only_ids(const std::string data_file,
+                                      float *pivots, // centroids, size = num_centers * dim
+                                      const size_t num_centers, const size_t dim,
+                                      const size_t gamma,  // max vectors per shard
+                                      const size_t omega,  // max overlap factor (>=2)
+                                      const float epsilon, // adaptive relaxation (>1.0)
+                                      const std::string prefix_path);
+
+template <typename T>
+int partition_with_ram_budget(const std::string data_file, size_t base_data_num, const double sampling_rate,
+                              double ram_budget, size_t graph_degree, const std::string prefix_path, size_t omega,
+                              const float epsilon);
+} // namespace sogaic

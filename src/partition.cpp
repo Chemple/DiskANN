@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+#include <cerrno>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <sstream>
@@ -21,6 +24,8 @@
 #include "parameters.h"
 #include "memory_mapper.h"
 #include "partition.h"
+#include "timer.h"
+
 #ifdef _WINDOWS
 #include <xmmintrin.h>
 #endif
@@ -601,6 +606,191 @@ int partition_with_ram_budget(const std::string data_file, const double sampling
     delete[] train_data_float;
     delete[] test_data_float;
     return num_parts;
+}
+
+template <typename T>
+int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
+                                              float *pivots, // centroids, size = num_centers * dim
+                                              const size_t num_centers, const size_t dim,
+                                              const size_t gamma,  // max vectors per shard
+                                              const size_t omega,  // max overlap factor (>=2)
+                                              const float epsilon, // adaptive relaxation (>1.0)
+                                              const std::string prefix_path)
+{
+    size_t read_blk_size = 64 * 1024 * 1024;
+    cached_ifstream base_reader(data_file, read_blk_size);
+
+    uint32_t npts32, basedim32;
+    base_reader.read(reinterpret_cast<char *>(&npts32), sizeof(uint32_t));
+    base_reader.read(reinterpret_cast<char *>(&basedim32), sizeof(uint32_t));
+    size_t num_points = npts32;
+    if (basedim32 != dim)
+    {
+        std::cerr << "Error: dimension mismatch" << std::endl;
+        return -1;
+    }
+
+    // Initialize shard writers and counters
+    std::unique_ptr<size_t[]> shard_counts = std::make_unique<size_t[]>(num_centers);
+    std::vector<std::ofstream> shard_data_writer(num_centers);
+    std::vector<std::ofstream> shard_idmap_writer(num_centers);
+    uint32_t dummy_size = 0;
+    uint32_t const_one = 1;
+
+    for (size_t i = 0; i < num_centers; ++i)
+    {
+        std::string data_filename = prefix_path + "_sogaic_subshard-" + std::to_string(i) + ".bin";
+        std::string idmap_filename = prefix_path + "_sogaic_subshard-" + std::to_string(i) + "_ids_uint32.bin";
+        shard_data_writer[i].open(data_filename, std::ios::binary);
+        shard_idmap_writer[i].open(idmap_filename, std::ios::binary);
+        shard_data_writer[i].write(reinterpret_cast<char *>(&dummy_size), sizeof(uint32_t));
+        shard_data_writer[i].write(reinterpret_cast<char *>(&basedim32), sizeof(uint32_t));
+        shard_idmap_writer[i].write(reinterpret_cast<char *>(&dummy_size), sizeof(uint32_t));
+        shard_idmap_writer[i].write(reinterpret_cast<char *>(&const_one), sizeof(uint32_t));
+        shard_counts[i] = 0;
+    }
+
+    size_t block_size = num_points <= BLOCK_SIZE ? num_points : BLOCK_SIZE;
+    std::unique_ptr<T[]> block_data_T = std::make_unique<T[]>(block_size * dim);
+    std::unique_ptr<float[]> block_data_float = std::make_unique<float[]>(block_size * dim);
+
+    // Pre-allocate arrays for distance calculations (similar to compute_closest_centers)
+    float *pivs_norms_squared = new float[num_centers];
+    float *pts_norms_squared = new float[block_size];
+    uint32_t *closest_centers = new uint32_t[block_size * omega];
+    float *distance_matrix = new float[num_centers * block_size];
+
+    // Compute squared norms of pivots once
+    math_utils::compute_vecs_l2sq(pivs_norms_squared, pivots, num_centers, dim);
+
+    size_t num_blocks = (num_points + block_size - 1) / block_size;
+
+    for (size_t block = 0; block < num_blocks; ++block)
+    {
+        size_t start_id = block * block_size;
+        size_t end_id = std::min((block + 1) * block_size, num_points);
+        size_t cur_blk_size = end_id - start_id;
+
+        base_reader.read(reinterpret_cast<char *>(block_data_T.get()), sizeof(T) * cur_blk_size * dim);
+        diskann::convert_types<T, float>(block_data_T.get(), block_data_float.get(), cur_blk_size, dim);
+
+        // Compute squared norms of data points in this block
+        math_utils::compute_vecs_l2sq(pts_norms_squared, block_data_float.get(), cur_blk_size, dim);
+
+        // Compute closest centers using the same logic as compute_closest_centers_in_block
+        math_utils::compute_closest_centers_in_block(block_data_float.get(), cur_blk_size, dim, pivots, num_centers,
+                                                     pts_norms_squared, pivs_norms_squared, closest_centers,
+                                                     distance_matrix, num_centers);
+
+        // Process each point in block
+        for (int p = 0; p < cur_blk_size; ++p)
+        {
+            size_t curOLPCnt = 0;
+            size_t curOLPFactor = 0;
+            double accDist = 0.0;
+            double curAVGDist = std::numeric_limits<double>::infinity();
+
+            uint32_t original_id = static_cast<uint32_t>(start_id + p);
+            const T *original_data = &block_data_T[p * dim];
+
+            // Process the closest omega centers
+            for (int p1 = num_centers - 1; p1 >= 0 && curOLPCnt < omega; p1--)
+            {
+                size_t c_idx = closest_centers[p * num_centers + p1];
+                float dist = distance_matrix[p * num_centers + c_idx];
+
+                if (dist <= epsilon * curAVGDist)
+                {
+                    curOLPFactor++;
+                    accDist += dist;
+                    curAVGDist = accDist / static_cast<double>(curOLPFactor);
+
+                    if (shard_counts[c_idx] < gamma)
+                    {
+                        // Assign to shard c_idx
+                        shard_data_writer[c_idx].write(reinterpret_cast<const char *>(original_data), sizeof(T) * dim);
+                        shard_idmap_writer[c_idx].write(reinterpret_cast<const char *>(&original_id), sizeof(uint32_t));
+                        shard_counts[c_idx]++;
+                        curOLPCnt++;
+                    }
+                    else
+                    {
+                        // Shard full: reset avg distance (skip this centroid)
+                        curAVGDist = std::numeric_limits<double>::infinity();
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean up
+    delete[] pivs_norms_squared;
+    delete[] pts_norms_squared;
+    delete[] closest_centers;
+    delete[] distance_matrix;
+
+    // Close files and write final counts
+    for (size_t i = 0; i < num_centers; i++)
+    {
+        shard_data_writer[i].seekp(0);
+        uint32_t count = static_cast<uint32_t>(shard_counts[i]);
+        shard_data_writer[i].write(reinterpret_cast<char *>(&count), sizeof(uint32_t));
+        shard_data_writer[i].close();
+        shard_idmap_writer[i].seekp(0);
+        shard_idmap_writer[i].write(reinterpret_cast<char *>(&count), sizeof(uint32_t));
+        shard_idmap_writer[i].close();
+    }
+
+    // Print the size of each cluster
+    diskann::cout << "Cluster sizes: ";
+    for (size_t i = 0; i < num_centers; i++)
+    {
+        if (i > 0)
+            diskann::cout << ", ";
+        diskann::cout << "cluster-" << i << ": " << shard_counts[i];
+    }
+    diskann::cout << "\n";
+
+    return 0;
+}
+
+template <typename T>
+int sogaic::partition_with_ram_budget(const std::string data_file, size_t base_data_num, const double sampling_rate,
+                                      double ram_budget, size_t graph_degree, const std::string prefix_path,
+                                      size_t omega, const float epsilon)
+{
+    auto output_file = prefix_path + "pivots.bin";
+    size_t train_dim = 0;
+    size_t train_num = 0;
+    float *train_data = nullptr;
+
+    gen_random_slice<T>(data_file, sampling_rate, train_data, train_num, train_dim);
+
+    auto max_ram_usage = 1024 * 1024 * 1024 * ram_budget;
+    auto gamma = diskann::estimate_max_size_from_ram(max_ram_usage, train_dim, sizeof(T), graph_degree);
+    auto estimate_num_part = static_cast<size_t>(std::ceil((double)omega * base_data_num / gamma));
+
+    float *pivot_data = nullptr;
+    pivot_data = new float[estimate_num_part * train_dim];
+    size_t max_k_means_reps = 10;
+
+    diskann::cout << "Processing global k-means (kmeans_partitioning Step)" << std::endl;
+    kmeans::kmeanspp_selecting_pivots(train_data, train_num, train_dim, pivot_data, estimate_num_part);
+
+    kmeans::run_lloyds(train_data, train_num, train_dim, pivot_data, estimate_num_part, max_k_means_reps, NULL, NULL);
+
+    diskann::cout << "Saving global k-center pivots" << std::endl;
+    diskann::save_bin<float>(output_file.c_str(), pivot_data, (size_t)estimate_num_part, train_dim);
+
+    diskann::cout << "number of cluster: " << estimate_num_part << std::endl;
+    diskann::cout << "the max size of each cluster: " << gamma << std::endl;
+    diskann::cout << "Partitioning data into clusters" << std::endl;
+    sogaic::shard_data_into_clusters_only_ids<T>(data_file, pivot_data, estimate_num_part, train_dim, gamma, omega,
+                                                 epsilon, prefix_path);
+
+    delete[] pivot_data;
+    delete[] train_data;
+    return 0;
 }
 
 // Instantations of supported templates

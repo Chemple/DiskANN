@@ -42,6 +42,26 @@ inline double estimate_ram_usage(size_t size, uint32_t dim, uint32_t datasize, u
     return OVERHEAD_FACTOR * (size_of_data + size_of_graph + size_of_locks + size_of_outer_vector);
 }
 
+inline size_t estimate_max_size_from_ram(double ram_usage, uint32_t dim, uint32_t datasize, uint32_t degree)
+{
+    if (ram_usage <= 0.0)
+        return 0;
+
+    double data_per_item = static_cast<double>(ROUND_UP(dim, 8)) * datasize;
+    double graph_per_item = static_cast<double>(degree) * sizeof(uint32_t) * defaults::GRAPH_SLACK_FACTOR;
+    double locks_per_item = static_cast<double>(sizeof(non_recursive_mutex));
+    double outer_vector_per_item = static_cast<double>(sizeof(ptrdiff_t));
+
+    double coeff = data_per_item + graph_per_item + locks_per_item + outer_vector_per_item;
+
+    if (coeff <= 0.0)
+        return 0;
+
+    double size = ram_usage / (OVERHEAD_FACTOR * coeff);
+
+    return static_cast<size_t>(std::floor(size));
+}
+
 template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> class Index : public AbstractIndex
 {
     /**************************************************************************

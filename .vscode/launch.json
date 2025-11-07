@@ -1,0 +1,26 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "disk_index_debug",
+            "program": "/home/shiwen/DiskANN/build/apps/build_disk_index",
+            "args": [
+                "--data_type", "float",
+                "--dist_fn", "l2",
+                "--data_path", "/home/shiwen/DiskANN/data/sift_100k/sift_base.fbin",
+                "--index_path_prefix", "/home/shiwen/DiskANN/data/sift_100k/index/disk_index_sift_base_R32_L50_A1.2",
+                "-R", "32",
+                "-L", "50",
+                "-B", "0.03",
+                "-M", "0.1",
+                "-T", "32"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
