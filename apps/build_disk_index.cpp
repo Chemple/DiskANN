@@ -1,8 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+#include <boost/program_options/value_semantic.hpp>
+#include <cstdint>
 #include <omp.h>
 #include <boost/program_options.hpp>
+#include <string>
 
 #include "utils.h"
 #include "disk_utils.h"
@@ -16,9 +19,9 @@ namespace po = boost::program_options;
 int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, data_path, index_path_prefix, codebook_prefix, label_file, universal_label,
-        label_type;
-    uint32_t num_threads, R, L, disk_PQ, build_PQ, QD, Lf, filter_threshold;
-    float B, M;
+        label_type, partitioning_algorithm_str;
+    uint32_t num_threads, R, L, disk_PQ, build_PQ, QD, Lf, filter_threshold, ommega;
+    float B, M, episilon;
     bool append_reorder_data = false;
     bool use_opq = false;
 
@@ -43,9 +46,15 @@ int main(int argc, char **argv)
                                        "compressed level for data while search happens");
         required_configs.add_options()("build_DRAM_budget,M", po::value<float>(&M)->required(),
                                        "DRAM budget in GB for building the index");
+        required_configs.add_options()("partitioning_algorithm", po::value<std::string>(&partitioning_algorithm_str),
+                                       "Partitioning algorithm to use");
 
         // Optional parameters
         po::options_description optional_configs("Optional");
+        optional_configs.add_options()("episilon", po::value<float>(&episilon)->default_value(1.2f),
+                                       "Episilon for building the sogaic index");
+        optional_configs.add_options()("ommega", po::value<uint32_t>(&ommega)->default_value(2),
+                                       "Ommege for building the sogaic index");
         optional_configs.add_options()("num_threads,T",
                                        po::value<uint32_t>(&num_threads)->default_value(omp_get_num_procs()),
                                        program_options_utils::NUMBER_THREADS_DESCRIPTION);
@@ -133,6 +142,8 @@ int main(int argc, char **argv)
         }
     }
 
+    auto partitioning_algorithm = stringToPartitioningAlgorithm(partitioning_algorithm_str);
+
     std::string params = std::string(std::to_string(R)) + " " + std::string(std::to_string(L)) + " " +
                          std::string(std::to_string(B)) + " " + std::string(std::to_string(M)) + " " +
                          std::string(std::to_string(num_threads)) + " " + std::string(std::to_string(disk_PQ)) + " " +
@@ -145,16 +156,19 @@ int main(int argc, char **argv)
         {
             if (data_type == std::string("int8"))
                 return diskann::build_disk_index<int8_t>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
-                                                         metric, use_opq, codebook_prefix, use_filters, label_file,
-                                                         universal_label, filter_threshold, Lf);
+                                                         metric, partitioning_algorithm, use_opq, codebook_prefix,
+                                                         use_filters, label_file, universal_label, filter_threshold, Lf,
+                                                         ommega, episilon);
             else if (data_type == std::string("uint8"))
                 return diskann::build_disk_index<uint8_t, uint16_t>(
-                    data_path.c_str(), index_path_prefix.c_str(), params.c_str(), metric, use_opq, codebook_prefix,
-                    use_filters, label_file, universal_label, filter_threshold, Lf);
+                    data_path.c_str(), index_path_prefix.c_str(), params.c_str(), metric, partitioning_algorithm,
+                    use_opq, codebook_prefix, use_filters, label_file, universal_label, filter_threshold, Lf, ommega,
+                    episilon);
             else if (data_type == std::string("float"))
                 return diskann::build_disk_index<float, uint16_t>(
-                    data_path.c_str(), index_path_prefix.c_str(), params.c_str(), metric, use_opq, codebook_prefix,
-                    use_filters, label_file, universal_label, filter_threshold, Lf);
+                    data_path.c_str(), index_path_prefix.c_str(), params.c_str(), metric, partitioning_algorithm,
+                    use_opq, codebook_prefix, use_filters, label_file, universal_label, filter_threshold, Lf, ommega,
+                    episilon);
             else
             {
                 diskann::cerr << "Error. Unsupported data type" << std::endl;
@@ -165,16 +179,19 @@ int main(int argc, char **argv)
         {
             if (data_type == std::string("int8"))
                 return diskann::build_disk_index<int8_t>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
-                                                         metric, use_opq, codebook_prefix, use_filters, label_file,
-                                                         universal_label, filter_threshold, Lf);
+                                                         metric, partitioning_algorithm, use_opq, codebook_prefix,
+                                                         use_filters, label_file, universal_label, filter_threshold, Lf,
+                                                         ommega, episilon);
             else if (data_type == std::string("uint8"))
                 return diskann::build_disk_index<uint8_t>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
-                                                          metric, use_opq, codebook_prefix, use_filters, label_file,
-                                                          universal_label, filter_threshold, Lf);
+                                                          metric, partitioning_algorithm, use_opq, codebook_prefix,
+                                                          use_filters, label_file, universal_label, filter_threshold,
+                                                          Lf, ommega, episilon);
             else if (data_type == std::string("float"))
                 return diskann::build_disk_index<float>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
-                                                        metric, use_opq, codebook_prefix, use_filters, label_file,
-                                                        universal_label, filter_threshold, Lf);
+                                                        metric, partitioning_algorithm, use_opq, codebook_prefix,
+                                                        use_filters, label_file, universal_label, filter_threshold, Lf,
+                                                        ommega, episilon);
             else
             {
                 diskann::cerr << "Error. Unsupported data type" << std::endl;

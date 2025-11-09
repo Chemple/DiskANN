@@ -625,12 +625,13 @@ void extract_shard_labels(const std::string &in_label_file, const std::string &s
 }
 
 template <typename T, typename LabelT>
-int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R,
+int build_merged_vamana_index(std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R,
                               double sampling_rate, double ram_budget, std::string mem_index_path,
                               std::string medoids_file, std::string centroids_file, size_t build_pq_bytes, bool use_opq,
-                              uint32_t num_threads, bool use_filters, const std::string &label_file,
-                              const std::string &labels_to_medoids_file, const std::string &universal_label,
-                              const uint32_t Lf)
+                              uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+                              const uint32_t ommega, const float episilon, bool use_filters,
+                              const std::string &label_file, const std::string &labels_to_medoids_file,
+                              const std::string &universal_label, const uint32_t Lf)
 {
     size_t base_num, base_dim;
     diskann::get_bin_metadata(base_file, base_num, base_dim);
@@ -649,7 +650,7 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
                                                   .with_num_threads(num_threads)
                                                   .build();
         using TagT = uint32_t;
-        diskann::Index<T, TagT, LabelT> _index(compareMetric, base_dim, base_num,
+        diskann::Index<T, TagT, LabelT> _index(_compareMetric, base_dim, base_num,
                                                std::make_shared<diskann::IndexWriteParameters>(paras), nullptr,
                                                defaults::NUM_FROZEN_POINTS_STATIC, false, false, false,
                                                build_pq_bytes > 0, build_pq_bytes, use_opq, use_filters);
@@ -687,8 +688,32 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
     std::string merged_index_prefix = mem_index_path + "_tempFiles";
 
     Timer timer;
-    int num_parts =
-        partition_with_ram_budget<T>(base_file, sampling_rate, ram_budget, 2 * R / 3, merged_index_prefix, 2);
+
+    int num_parts;
+
+    switch (partition_algorithm)
+    {
+    case PartitioningAlgorithm::DISKANN: {
+        num_parts =
+            partition_with_ram_budget<T>(base_file, sampling_rate, ram_budget, 2 * R / 3, merged_index_prefix, 2);
+        break;
+    }
+    case PartitioningAlgorithm::SOGAIC: {
+        auto max_ram_usage = 1024 * 1024 * 1024 * ram_budget;
+        auto gamma = diskann::estimate_max_size_from_ram(max_ram_usage, base_dim, sizeof(T), 2 * R / 3);
+        auto estimate_num_part = static_cast<size_t>(std::ceil((double)ommega * base_num / gamma));
+        num_parts = estimate_num_part;
+        sogaic::partition_with_ram_budget<T>(base_file, base_num, sampling_rate, ram_budget, 2 * R / 3,
+                                             merged_index_prefix, ommega, episilon);
+        break;
+    }
+    default: {
+        diskann::cout << "Not support partition algorithm"
+                      << "\n";
+        exit(-1);
+    }
+    }
+
     diskann::cout << timer.elapsed_seconds_for_step("partitioning data ") << std::endl;
 
     std::string cur_centroid_filepath = merged_index_prefix + "_centroids.bin";
@@ -720,7 +745,7 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
         uint64_t shard_base_dim, shard_base_pts;
         get_bin_metadata(shard_base_file, shard_base_pts, shard_base_dim);
 
-        diskann::Index<T> _index(compareMetric, shard_base_dim, shard_base_pts,
+        diskann::Index<T> _index(_compareMetric, shard_base_dim, shard_base_pts,
                                  std::make_shared<diskann::IndexWriteParameters>(low_degree_params), nullptr,
                                  defaults::NUM_FROZEN_POINTS_STATIC, false, false, false, build_pq_bytes > 0,
                                  build_pq_bytes, use_opq);
@@ -1099,9 +1124,12 @@ void create_disk_layout(const std::string base_file, const std::string mem_index
 
 template <typename T, typename LabelT>
 int build_disk_index(const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
-                     diskann::Metric compareMetric, bool use_opq, const std::string &codebook_prefix, bool use_filters,
-                     const std::string &label_file, const std::string &universal_label, const uint32_t filter_threshold,
-                     const uint32_t Lf)
+                     diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+                     const std::string &codebook_prefix, // default is empty for no codebook pass in
+                     bool use_filters,
+                     const std::string &label_file,      // default is empty string for no label_file
+                     const std::string &universal_label, // default is empty string for no universal label
+                     const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega, const float episilon)
 {
     std::stringstream parser;
     parser << std::string(indexBuildParameters);
@@ -1130,7 +1158,7 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
     }
 
     if (!std::is_same<T, float>::value &&
-        (compareMetric == diskann::Metric::INNER_PRODUCT || compareMetric == diskann::Metric::COSINE))
+        (_compareMetric == diskann::Metric::INNER_PRODUCT || _compareMetric == diskann::Metric::COSINE))
     {
         std::stringstream stream;
         stream << "Disk-index build currently only supports floating point data for Max "
@@ -1204,7 +1232,7 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
     // output a new base file which contains extra dimension with sqrt(1 -
     // ||x||^2/M^2) for every x, M is max norm of all points. Extra space on
     // disk needed!
-    if (compareMetric == diskann::Metric::INNER_PRODUCT)
+    if (_compareMetric == diskann::Metric::INNER_PRODUCT)
     {
         Timer timer;
         std::cout << "Using Inner Product search, so need to pre-process base "
@@ -1219,7 +1247,7 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
         diskann::cout << timer.elapsed_seconds_for_step("preprocessing data for inner product") << std::endl;
         created_temp_file_for_processed_data = true;
     }
-    else if (compareMetric == diskann::Metric::COSINE)
+    else if (_compareMetric == diskann::Metric::COSINE)
     {
         Timer timer;
         std::cout << "Normalizing data for cosine to temporary file, please ensure there is additional "
@@ -1292,7 +1320,7 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
     if (use_disk_pq)
     {
         generate_disk_quantized_data<T>(data_file_to_use, disk_pq_pivots_path, disk_pq_compressed_vectors_path,
-                                        compareMetric, p_val, disk_pq_dims);
+                                        _compareMetric, p_val, disk_pq_dims);
     }
     size_t num_pq_chunks = (size_t)(std::floor)(uint64_t(final_index_ram_limit / points_num));
 
@@ -1311,7 +1339,7 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
     diskann::cout << "Compressing " << dim << "-dimensional data into " << num_pq_chunks << " bytes per vector."
                   << std::endl;
 
-    generate_quantized_data<T>(data_file_to_use, pq_pivots_path, pq_compressed_vectors_path, compareMetric, p_val,
+    generate_quantized_data<T>(data_file_to_use, pq_pivots_path, pq_compressed_vectors_path, _compareMetric, p_val,
                                num_pq_chunks, use_opq, codebook_prefix);
     diskann::cout << timer.elapsed_seconds_for_step("generating quantized data") << std::endl;
 
@@ -1322,10 +1350,10 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
 #endif
     // Whether it is cosine or inner product, we still L2 metric due to the pre-processing.
     timer.reset();
-    diskann::build_merged_vamana_index<T, LabelT>(data_file_to_use.c_str(), diskann::Metric::L2, L, R, p_val,
-                                                  indexing_ram_budget, mem_index_path, medoids_path, centroids_path,
-                                                  build_pq_bytes, use_opq, num_threads, use_filters, labels_file_to_use,
-                                                  labels_to_medoids_path, universal_label, Lf);
+    diskann::build_merged_vamana_index<T, LabelT>(
+        data_file_to_use.c_str(), diskann::Metric::L2, L, R, p_val, indexing_ram_budget, mem_index_path, medoids_path,
+        centroids_path, build_pq_bytes, use_opq, num_threads, partition_algorithm, ommega, episilon, use_filters,
+        labels_file_to_use, labels_to_medoids_path, universal_label, Lf);
     diskann::cout << timer.elapsed_seconds_for_step("building merged vamana index") << std::endl;
 
     timer.reset();
@@ -1427,79 +1455,79 @@ template DISKANN_DLLEXPORT uint32_t optimize_beamwidth<float, uint16_t>(
     std::unique_ptr<diskann::PQFlashIndex<float, uint16_t>> &pFlashIndex, float *tuning_sample,
     uint64_t tuning_sample_num, uint64_t tuning_sample_aligned_dim, uint32_t L, uint32_t nthreads, uint32_t start_bw);
 
-template DISKANN_DLLEXPORT int build_disk_index<int8_t, uint32_t>(const char *dataFilePath, const char *indexFilePath,
-                                                                  const char *indexBuildParameters,
-                                                                  diskann::Metric compareMetric, bool use_opq,
-                                                                  const std::string &codebook_prefix, bool use_filters,
-                                                                  const std::string &label_file,
-                                                                  const std::string &universal_label,
-                                                                  const uint32_t filter_threshold, const uint32_t Lf);
-template DISKANN_DLLEXPORT int build_disk_index<uint8_t, uint32_t>(const char *dataFilePath, const char *indexFilePath,
-                                                                   const char *indexBuildParameters,
-                                                                   diskann::Metric compareMetric, bool use_opq,
-                                                                   const std::string &codebook_prefix, bool use_filters,
-                                                                   const std::string &label_file,
-                                                                   const std::string &universal_label,
-                                                                   const uint32_t filter_threshold, const uint32_t Lf);
-template DISKANN_DLLEXPORT int build_disk_index<float, uint32_t>(const char *dataFilePath, const char *indexFilePath,
-                                                                 const char *indexBuildParameters,
-                                                                 diskann::Metric compareMetric, bool use_opq,
-                                                                 const std::string &codebook_prefix, bool use_filters,
-                                                                 const std::string &label_file,
-                                                                 const std::string &universal_label,
-                                                                 const uint32_t filter_threshold, const uint32_t Lf);
+template DISKANN_DLLEXPORT int build_disk_index<int8_t, uint32_t>(
+    const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
+    diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+    const std::string &codebook_prefix, bool use_filters, const std::string &label_file,
+    const std::string &universal_label, const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega,
+    const float episilon);
+template DISKANN_DLLEXPORT int build_disk_index<uint8_t, uint32_t>(
+    const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
+    diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+    const std::string &codebook_prefix, bool use_filters, const std::string &label_file,
+    const std::string &universal_label, const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega,
+    const float episilon);
+template DISKANN_DLLEXPORT int build_disk_index<float, uint32_t>(
+    const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
+    diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+    const std::string &codebook_prefix, bool use_filters, const std::string &label_file,
+    const std::string &universal_label, const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega,
+    const float episilon);
 // LabelT = uint16
-template DISKANN_DLLEXPORT int build_disk_index<int8_t, uint16_t>(const char *dataFilePath, const char *indexFilePath,
-                                                                  const char *indexBuildParameters,
-                                                                  diskann::Metric compareMetric, bool use_opq,
-                                                                  const std::string &codebook_prefix, bool use_filters,
-                                                                  const std::string &label_file,
-                                                                  const std::string &universal_label,
-                                                                  const uint32_t filter_threshold, const uint32_t Lf);
-template DISKANN_DLLEXPORT int build_disk_index<uint8_t, uint16_t>(const char *dataFilePath, const char *indexFilePath,
-                                                                   const char *indexBuildParameters,
-                                                                   diskann::Metric compareMetric, bool use_opq,
-                                                                   const std::string &codebook_prefix, bool use_filters,
-                                                                   const std::string &label_file,
-                                                                   const std::string &universal_label,
-                                                                   const uint32_t filter_threshold, const uint32_t Lf);
-template DISKANN_DLLEXPORT int build_disk_index<float, uint16_t>(const char *dataFilePath, const char *indexFilePath,
-                                                                 const char *indexBuildParameters,
-                                                                 diskann::Metric compareMetric, bool use_opq,
-                                                                 const std::string &codebook_prefix, bool use_filters,
-                                                                 const std::string &label_file,
-                                                                 const std::string &universal_label,
-                                                                 const uint32_t filter_threshold, const uint32_t Lf);
+template DISKANN_DLLEXPORT int build_disk_index<int8_t, uint16_t>(
+    const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
+    diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+    const std::string &codebook_prefix, bool use_filters, const std::string &label_file,
+    const std::string &universal_label, const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega,
+    const float episilon);
+template DISKANN_DLLEXPORT int build_disk_index<uint8_t, uint16_t>(
+    const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
+    diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+    const std::string &codebook_prefix, bool use_filters, const std::string &label_file,
+    const std::string &universal_label, const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega,
+    const float episilon);
+template DISKANN_DLLEXPORT int build_disk_index<float, uint16_t>(
+    const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
+    diskann::Metric _compareMetric, PartitioningAlgorithm partition_algorithm, bool use_opq,
+    const std::string &codebook_prefix, bool use_filters, const std::string &label_file,
+    const std::string &universal_label, const uint32_t filter_threshold, const uint32_t Lf, const uint32_t ommega,
+    const float episilon);
 
 template DISKANN_DLLEXPORT int build_merged_vamana_index<int8_t, uint32_t>(
-    std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R, double sampling_rate,
-    double ram_budget, std::string mem_index_path, std::string medoids_path, std::string centroids_file,
-    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, bool use_filters, const std::string &label_file,
+    std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R, double sampling_rate,
+    double ram_budget, std::string mem_index_path, std::string medoids_file, std::string centroids_file,
+    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+    const uint32_t ommega, const float episilon, bool use_filters, const std::string &label_file,
     const std::string &labels_to_medoids_file, const std::string &universal_label, const uint32_t Lf);
 template DISKANN_DLLEXPORT int build_merged_vamana_index<float, uint32_t>(
-    std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R, double sampling_rate,
-    double ram_budget, std::string mem_index_path, std::string medoids_path, std::string centroids_file,
-    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, bool use_filters, const std::string &label_file,
+    std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R, double sampling_rate,
+    double ram_budget, std::string mem_index_path, std::string medoids_file, std::string centroids_file,
+    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+    const uint32_t ommega, const float episilon, bool use_filters, const std::string &label_file,
     const std::string &labels_to_medoids_file, const std::string &universal_label, const uint32_t Lf);
 template DISKANN_DLLEXPORT int build_merged_vamana_index<uint8_t, uint32_t>(
-    std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R, double sampling_rate,
-    double ram_budget, std::string mem_index_path, std::string medoids_path, std::string centroids_file,
-    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, bool use_filters, const std::string &label_file,
+    std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R, double sampling_rate,
+    double ram_budget, std::string mem_index_path, std::string medoids_file, std::string centroids_file,
+    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+    const uint32_t ommega, const float episilon, bool use_filters, const std::string &label_file,
     const std::string &labels_to_medoids_file, const std::string &universal_label, const uint32_t Lf);
 // Label=16_t
 template DISKANN_DLLEXPORT int build_merged_vamana_index<int8_t, uint16_t>(
-    std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R, double sampling_rate,
-    double ram_budget, std::string mem_index_path, std::string medoids_path, std::string centroids_file,
-    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, bool use_filters, const std::string &label_file,
+    std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R, double sampling_rate,
+    double ram_budget, std::string mem_index_path, std::string medoids_file, std::string centroids_file,
+    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+    const uint32_t ommega, const float episilon, bool use_filters, const std::string &label_file,
     const std::string &labels_to_medoids_file, const std::string &universal_label, const uint32_t Lf);
 template DISKANN_DLLEXPORT int build_merged_vamana_index<float, uint16_t>(
-    std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R, double sampling_rate,
-    double ram_budget, std::string mem_index_path, std::string medoids_path, std::string centroids_file,
-    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, bool use_filters, const std::string &label_file,
+    std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R, double sampling_rate,
+    double ram_budget, std::string mem_index_path, std::string medoids_file, std::string centroids_file,
+    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+    const uint32_t ommega, const float episilon, bool use_filters, const std::string &label_file,
     const std::string &labels_to_medoids_file, const std::string &universal_label, const uint32_t Lf);
 template DISKANN_DLLEXPORT int build_merged_vamana_index<uint8_t, uint16_t>(
-    std::string base_file, diskann::Metric compareMetric, uint32_t L, uint32_t R, double sampling_rate,
-    double ram_budget, std::string mem_index_path, std::string medoids_path, std::string centroids_file,
-    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, bool use_filters, const std::string &label_file,
+    std::string base_file, diskann::Metric _compareMetric, uint32_t L, uint32_t R, double sampling_rate,
+    double ram_budget, std::string mem_index_path, std::string medoids_file, std::string centroids_file,
+    size_t build_pq_bytes, bool use_opq, uint32_t num_threads, const PartitioningAlgorithm partition_algorithm,
+    const uint32_t ommega, const float episilon, bool use_filters, const std::string &label_file,
     const std::string &labels_to_medoids_file, const std::string &universal_label, const uint32_t Lf);
 }; // namespace diskann

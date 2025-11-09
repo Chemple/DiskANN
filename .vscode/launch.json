@@ -7,18 +7,78 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "disk_index_debug",
+            "name": "build_sogaic_index",
             "program": "/home/shiwen/DiskANN/build/apps/build_disk_index",
             "args": [
                 "--data_type", "float",
                 "--dist_fn", "l2",
                 "--data_path", "/home/shiwen/DiskANN/data/sift_100k/sift_base.fbin",
-                "--index_path_prefix", "/home/shiwen/DiskANN/data/sift_100k/index/disk_index_sift_base_R32_L50_A1.2",
+                "--index_path_prefix", "/home/shiwen/DiskANN/data/sift_100k/sogaic_index_episilon_1_0/disk_index_sift_base_R32_L50_A1.2",
                 "-R", "32",
                 "-L", "50",
                 "-B", "0.03",
                 "-M", "0.1",
-                "-T", "32"
+                "--partitioning_algorithm", "SOGAIC",
+                "--ommega", "2",
+                "--episilon", "1.0",
+                "-T", "64"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "build_diskann_index",
+            "program": "/home/shiwen/DiskANN/build/apps/build_disk_index",
+            "args": [
+                "--data_type", "float",
+                "--dist_fn", "l2",
+                "--data_path", "/home/shiwen/DiskANN/data/sift_100k/sift_base.fbin",
+                "--index_path_prefix", "/home/shiwen/DiskANN/data/sift_100k/diskann_index/disk_index_sift_base_R32_L50_A1.2",
+                "-R", "32",
+                "-L", "50",
+                "-B", "0.03",
+                "-M", "0.1",
+                "--partitioning_algorithm", "DISKANN",
+                "--ommega", "2",
+                "--episilon", "1.2",
+                "-T", "64"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "search_sogaic_index",
+            "program": "/home/shiwen/DiskANN/build/apps/search_disk_index",
+            "args": [
+                "--data_type", "float",
+                "--dist_fn", "l2",
+                "--index_path_prefix", "/home/shiwen/DiskANN/data/sift_100k/sogaic_index_episilon_1_0/disk_index_sift_base_R32_L50_A1.2",
+                "--query_file", "/home/shiwen/DiskANN/data/sift_100k/sift_query.fbin",
+                "--gt_file", "/home/shiwen/DiskANN/data/sift_100k/sift_query_gt_100",
+                "-K", "10",
+                "-L", "50",
+                "--result_path", "/home/shiwen/DiskANN/data/sift_100k/res_sogaic_index_sift_query_10",
+                "--num_nodes_to_cache", "10000"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "search_diskann_index",
+            "program": "/home/shiwen/DiskANN/build/apps/search_disk_index",
+            "args": [
+                "--data_type", "float",
+                "--dist_fn", "l2",
+                "--index_path_prefix", "/home/shiwen/DiskANN/data/sift_100k/diskann_index/disk_index_sift_base_R32_L50_A1.2",
+                "--query_file", "/home/shiwen/DiskANN/data/sift_100k/sift_query.fbin",
+                "--gt_file", "/home/shiwen/DiskANN/data/sift_100k/sift_query_gt_100",
+                "-K", "10",
+                "-L", "50",
+                "--result_path", "/home/shiwen/DiskANN/data/sift_100k/res_diskann_index_sift_query_10",
+                "--num_nodes_to_cache", "10000"
             ],
             "cwd": "${workspaceFolder}"
         }

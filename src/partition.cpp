@@ -35,6 +35,34 @@
 
 // #define SAVE_INFLATED_PQ true
 
+PartitioningAlgorithm stringToPartitioningAlgorithm(const std::string &str)
+{
+    static const std::unordered_map<std::string, PartitioningAlgorithm> mapping = {
+        {"DISKANN", PartitioningAlgorithm::DISKANN}, {"SOGAIC", PartitioningAlgorithm::SOGAIC}};
+
+    auto result = mapping.find(str);
+    if (result != mapping.end())
+    {
+        return result->second;
+    }
+
+    throw std::invalid_argument("Invalid PartitioningAlgorithm string: " + str);
+}
+
+std::string partitioningAlgorithmToString(PartitioningAlgorithm algorithm)
+{
+    static const std::unordered_map<PartitioningAlgorithm, std::string> mapping = {
+        {PartitioningAlgorithm::DISKANN, "DISKANN"}, {PartitioningAlgorithm::SOGAIC, "SOGAIC"}};
+
+    auto result = mapping.find(algorithm);
+    if (result != mapping.end())
+    {
+        return result->second;
+    }
+
+    throw std::invalid_argument("Unknown PartitioningAlgorithm value");
+}
+
 template <typename T>
 void gen_random_slice(const std::string base_file, const std::string output_prefix, double sampling_rate)
 {
@@ -632,19 +660,19 @@ int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
 
     // Initialize shard writers and counters
     std::unique_ptr<size_t[]> shard_counts = std::make_unique<size_t[]>(num_centers);
-    std::vector<std::ofstream> shard_data_writer(num_centers);
+    // std::vector<std::ofstream> shard_data_writer(num_centers);
     std::vector<std::ofstream> shard_idmap_writer(num_centers);
     uint32_t dummy_size = 0;
     uint32_t const_one = 1;
 
     for (size_t i = 0; i < num_centers; ++i)
     {
-        std::string data_filename = prefix_path + "_sogaic_subshard-" + std::to_string(i) + ".bin";
-        std::string idmap_filename = prefix_path + "_sogaic_subshard-" + std::to_string(i) + "_ids_uint32.bin";
-        shard_data_writer[i].open(data_filename, std::ios::binary);
+        // std::string data_filename = prefix_path + "_subshard-" + std::to_string(i) + ".bin";
+        std::string idmap_filename = prefix_path + "_subshard-" + std::to_string(i) + "_ids_uint32.bin";
+        // shard_data_writer[i].open(data_filename, std::ios::binary);
         shard_idmap_writer[i].open(idmap_filename, std::ios::binary);
-        shard_data_writer[i].write(reinterpret_cast<char *>(&dummy_size), sizeof(uint32_t));
-        shard_data_writer[i].write(reinterpret_cast<char *>(&basedim32), sizeof(uint32_t));
+        // shard_data_writer[i].write(reinterpret_cast<char *>(&dummy_size), sizeof(uint32_t));
+        // shard_data_writer[i].write(reinterpret_cast<char *>(&basedim32), sizeof(uint32_t));
         shard_idmap_writer[i].write(reinterpret_cast<char *>(&dummy_size), sizeof(uint32_t));
         shard_idmap_writer[i].write(reinterpret_cast<char *>(&const_one), sizeof(uint32_t));
         shard_counts[i] = 0;
@@ -657,7 +685,7 @@ int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
     // Pre-allocate arrays for distance calculations (similar to compute_closest_centers)
     float *pivs_norms_squared = new float[num_centers];
     float *pts_norms_squared = new float[block_size];
-    uint32_t *closest_centers = new uint32_t[block_size * omega];
+    uint32_t *closest_centers = new uint32_t[block_size * num_centers];
     float *distance_matrix = new float[num_centers * block_size];
 
     // Compute squared norms of pivots once
@@ -688,7 +716,7 @@ int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
             size_t curOLPCnt = 0;
             size_t curOLPFactor = 0;
             double accDist = 0.0;
-            double curAVGDist = std::numeric_limits<double>::infinity();
+            double curAVGDist = std::numeric_limits<double>::max();
 
             uint32_t original_id = static_cast<uint32_t>(start_id + p);
             const T *original_data = &block_data_T[p * dim];
@@ -708,7 +736,8 @@ int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
                     if (shard_counts[c_idx] < gamma)
                     {
                         // Assign to shard c_idx
-                        shard_data_writer[c_idx].write(reinterpret_cast<const char *>(original_data), sizeof(T) * dim);
+                        // shard_data_writer[c_idx].write(reinterpret_cast<const char *>(original_data), sizeof(T) *
+                        // dim);
                         shard_idmap_writer[c_idx].write(reinterpret_cast<const char *>(&original_id), sizeof(uint32_t));
                         shard_counts[c_idx]++;
                         curOLPCnt++;
@@ -716,7 +745,7 @@ int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
                     else
                     {
                         // Shard full: reset avg distance (skip this centroid)
-                        curAVGDist = std::numeric_limits<double>::infinity();
+                        curAVGDist = std::numeric_limits<double>::max();
                     }
                 }
             }
@@ -732,10 +761,10 @@ int sogaic::shard_data_into_clusters_only_ids(const std::string data_file,
     // Close files and write final counts
     for (size_t i = 0; i < num_centers; i++)
     {
-        shard_data_writer[i].seekp(0);
+        // shard_data_writer[i].seekp(0);
         uint32_t count = static_cast<uint32_t>(shard_counts[i]);
-        shard_data_writer[i].write(reinterpret_cast<char *>(&count), sizeof(uint32_t));
-        shard_data_writer[i].close();
+        // shard_data_writer[i].write(reinterpret_cast<char *>(&count), sizeof(uint32_t));
+        // shard_data_writer[i].close();
         shard_idmap_writer[i].seekp(0);
         shard_idmap_writer[i].write(reinterpret_cast<char *>(&count), sizeof(uint32_t));
         shard_idmap_writer[i].close();
@@ -759,7 +788,7 @@ int sogaic::partition_with_ram_budget(const std::string data_file, size_t base_d
                                       double ram_budget, size_t graph_degree, const std::string prefix_path,
                                       size_t omega, const float epsilon)
 {
-    auto output_file = prefix_path + "pivots.bin";
+    auto output_file = prefix_path + "_centroids.bin";
     size_t train_dim = 0;
     size_t train_num = 0;
     float *train_data = nullptr;
@@ -837,6 +866,18 @@ template DISKANN_DLLEXPORT int partition_with_ram_budget<uint8_t>(const std::str
 template DISKANN_DLLEXPORT int partition_with_ram_budget<float>(const std::string data_file, const double sampling_rate,
                                                                 double ram_budget, size_t graph_degree,
                                                                 const std::string prefix_path, size_t k_base);
+
+template DISKANN_DLLEXPORT int sogaic::partition_with_ram_budget<int8_t>(
+    const std::string data_file, size_t base_data_num, const double sampling_rate, double ram_budget,
+    size_t graph_degree, const std::string prefix_path, size_t omega, const float epsilon);
+
+template DISKANN_DLLEXPORT int sogaic::partition_with_ram_budget<uint8_t>(
+    const std::string data_file, size_t base_data_num, const double sampling_rate, double ram_budget,
+    size_t graph_degree, const std::string prefix_path, size_t omega, const float epsilon);
+
+template DISKANN_DLLEXPORT int sogaic::partition_with_ram_budget<float>(
+    const std::string data_file, size_t base_data_num, const double sampling_rate, double ram_budget,
+    size_t graph_degree, const std::string prefix_path, size_t omega, const float epsilon);
 
 template DISKANN_DLLEXPORT int retrieve_shard_data_from_ids<float>(const std::string data_file,
                                                                    std::string idmap_filename,

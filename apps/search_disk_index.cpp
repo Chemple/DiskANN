@@ -98,6 +98,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         calc_recall_flag = true;
     }
 
+    query_num = 1000;
+    gt_num = 1000;
+
     std::shared_ptr<AlignedFileReader> reader = nullptr;
 #ifdef _WINDOWS
 #ifndef USE_BING_INFRA
